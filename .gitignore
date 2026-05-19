@@ -1,0 +1,16 @@
+.env
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+rag_env/
+results/
+.memory/
+.vector_db/
+.pytest_cache/
+.deepeval/
+.benchmarks/
+.vscode/
+pyenv-install.ps1
+.python-version
+*.log
