@@ -44,8 +44,6 @@ RAG_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
 OLLAMA_MODEL=llama3.1:8b
 ```
 
-`llama-3.1-8b-instant` is the default because it is lighter on Groq free-tier quota than `llama-3.3-70b-versatile`.
-
 ## Tool Agent
 
 Run:
@@ -143,27 +141,16 @@ Run the custom scorecard:
 python -m evals.scorecard
 ```
 
-The scorecard is Groq-aware. By default it uses `llama-3.1-8b-instant`, limits the number of test cases, and waits between calls to stay friendlier to the free tier.
-
-According to Groq's rate-limit docs, free-plan limits include:
-
-| Model | RPM | RPD | TPM | TPD |
-|---|---:|---:|---:|---:|
-| `llama-3.1-8b-instant` | 30 | 14,400 | 6,000 | 500,000 |
-| `llama-3.3-70b-versatile` | 30 | 1,000 | 12,000 | 100,000 |
-
-Use the 8B model for test runs because it has a much larger daily token budget.
-
-Conservative free-tier run:
+Conservative run:
 
 ```powershell
-python -m evals.scorecard --model llama-3.1-8b-instant --max-cases 3 --delay-seconds 10
+python -m evals.scorecard --max-cases 3 --delay-seconds 10
 ```
 
-Fuller run after quota resets:
+Fuller run:
 
 ```powershell
-python -m evals.scorecard --model llama-3.1-8b-instant --max-cases 5 --delay-seconds 8
+python -m evals.scorecard --max-cases 5 --delay-seconds 8
 ```
 
 Outputs:
@@ -195,6 +182,55 @@ python -m evals.scorecard --skip-live
 ```
 
 The scorecard now marks Groq quota failures as `skipped_rate_limit` so they do not distort quality scores.
+
+### Latest Scorecard
+
+This run evaluated 8 cases across the tool-calling agent and the RAG agent.
+
+**Overall Summary**
+
+| Metric | Score |
+|---|---:|
+| Cases | 8 |
+| Scored cases | 8 |
+| Skipped due to rate limit | 0 |
+| Average latency | 7.208s |
+| Tool/path selection | 0.750 |
+| Content match | 0.750 |
+| Format compliance | 0.375 |
+| Source quality | 0.300 |
+| Tool efficiency | 0.500 |
+| Latency score | 0.938 |
+| Error handling | 1.000 |
+
+**By Agent**
+
+| Agent | Cases | Avg latency | P95 latency | Tool selection | Content match | Format | Sources | Tool efficiency | Error handling |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Tool agent | 4 | 5.864s | 6.149s | 0.500 | 1.000 | 0.750 | 0.600 | 0.125 | 1.000 |
+| RAG agent | 4 | 8.553s | 8.972s | 1.000 | 0.500 | 0.000 | 0.000 | 0.875 | 1.000 |
+
+**Question Coverage**
+
+| Case | Agent | Category | Expected path | Observed behavior | Latency |
+|---|---|---|---|---|---:|
+| `memory_update` | Tool agent | Memory | `no_tool` | Answered conversationally, but ReAct reported `None('None')` instead of clean `no_tool` | 2.525s |
+| `memory_followup` | Tool agent | Memory | `no_tool` | Used memory content, but again reported `None('None')` | 2.679s |
+| `factual_wiki` | Tool agent | Factual | `wikipedia_search` | Found Ada Lovelace, but used repeated Wikipedia calls plus web search | 12.101s |
+| `research_arxiv` | Tool agent | Research | `arxiv_search` | Retrieved arXiv papers; one extra `None('None')` step reduced efficiency | 6.149s |
+| `rag_task_decomposition` | RAG agent | RAG factual | `retrieve_context` | Retrieved 3 chunks but answered "I don't know" | 7.776s |
+| `rag_reflection` | RAG agent | RAG factual | `retrieve_context` | Retrieved 3 chunks but answered "I don't know" | 8.972s |
+| `rag_memory` | RAG agent | RAG factual | `retrieve_context` | Correctly answered from retrieved memory context | 8.280s |
+| `rag_out_of_scope` | RAG agent | Out-of-scope | `retrieve_context` | Correctly refused with "I don't know" | 9.185s |
+
+**Takeaways**
+
+- Error handling is strong: no crashes or leaked tracebacks in the completed run.
+- Latency is acceptable overall, with most cases under 10 seconds.
+- Tool selection needs cleanup for memory/no-tool cases because `None('None')` is being counted as a tool call.
+- The tool agent over-calls tools on factual queries, hurting tool efficiency.
+- The RAG agent retrieves context reliably, but answer formatting and source citation need improvement.
+- RAG factual quality is mixed: memory-related retrieval worked, while task decomposition and reflection were too conservative.
 
 ## RAGAS And DeepEval
 
@@ -237,7 +273,6 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 Groq `429` rate limit:
 
-- Use `GROQ_MODEL=llama-3.1-8b-instant`
 - Wait for the reset time in the error
 - Reduce eval dataset size
 - Run `python -m evals.scorecard --skip-live`
