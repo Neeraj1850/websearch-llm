@@ -18,14 +18,20 @@ from typing import Any
 
 from agent import ask_agent
 from evals.scorecard_dataset import RAG_SCORECARD_CASES, TOOL_AGENT_CASES
+from langchain_compat import install_cachebacked_embeddings_shim
+
+install_cachebacked_embeddings_shim()
+
 from rag_agent import (
     DEFAULT_COLLECTION,
+    DEFAULT_RAG_K,
     DEFAULT_URL,
     DEFAULT_VECTOR_DB_DIR,
-    ask_rag_agent,
+    ask,
     load_vector_store,
-    retrieve_context_documents,
-    vector_store_has_documents,
+    prepare_retrieval_queries,
+    retrieve_context,
+    _vector_store_is_empty,
 )
 
 
@@ -142,7 +148,7 @@ def rate_limit_record(
             "This case was not scored. Wait for reset, reduce max cases, or use Ollama for RAG."
         ),
         "tool_calls": [],
-        "expected_tool": case.get("expected_tool", "retrieve_context"),
+        "expected_tool": case.get("expected_tool", "hybrid_retrieval"),
         "latency_seconds": round(latency, 3),
         "status": "skipped_rate_limit",
         "tool_selection_score": None,
@@ -231,7 +237,7 @@ def run_tool_agent_cases(skip_live: bool, max_cases: int | None, delay_seconds: 
 def run_rag_cases(skip_live: bool, max_cases: int | None, delay_seconds: float) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     vector_store = load_vector_store(DEFAULT_COLLECTION, DEFAULT_VECTOR_DB_DIR)
-    if skip_live and not vector_store_has_documents(vector_store):
+    if skip_live and _vector_store_is_empty(vector_store):
         return records
     executed = 0
 
@@ -241,7 +247,8 @@ def run_rag_cases(skip_live: bool, max_cases: int | None, delay_seconds: float) 
         started = time.perf_counter()
         try:
             if skip_live:
-                docs = retrieve_context_documents(vector_store, case["question"], k=3)
+                retrieval_queries, route_topic = prepare_retrieval_queries(case["question"])
+                docs = retrieve_context(vector_store, retrieval_queries, k=DEFAULT_RAG_K, topic=route_topic)
                 contexts = [doc.page_content for doc in docs]
                 sources = [doc.metadata.get("source", "unknown") for doc in docs]
                 preview = " ".join(" ".join(context.split()) for context in contexts)[:400]
@@ -250,22 +257,29 @@ def run_rag_cases(skip_live: bool, max_cases: int | None, delay_seconds: float) 
                     f"Sources: {', '.join(sorted(set(sources))) if sources else 'No external source used'}\n"
                     "Rationale: This skip-live mode validates retrieval without using Groq tokens."
                 )
-                tool_calls = [f"retrieve_context({case['question']!r})"]
+                tool_calls = [f"hybrid_retrieval(queries={retrieval_queries!r}, k={DEFAULT_RAG_K}, topic={route_topic!r})"]
+                cached = False
+                cache_type = None
+                cache_score = 0.0
                 latency = time.perf_counter() - started
             else:
-                result = ask_rag_agent(
+                result = ask(
                     case["question"],
-                    DEFAULT_URL,
-                    "post-title,post-header,post-content",
-                    DEFAULT_COLLECTION,
-                    DEFAULT_VECTOR_DB_DIR,
+                    url=DEFAULT_URL,
+                    collection_name=DEFAULT_COLLECTION,
+                    persist_directory=DEFAULT_VECTOR_DB_DIR,
                     auto_index=True,
                 )
                 answer = result["answer"]
-                tool_calls = result["tool_calls"]
+                retrieval_queries = result.get("retrieval_queries", [case["question"]])
+                route_topic = result.get("topic_filter")
+                tool_calls = [f"hybrid_retrieval(queries={retrieval_queries!r}, k={DEFAULT_RAG_K}, topic={route_topic!r})"]
                 latency = result["latency_seconds"]
                 contexts = result.get("contexts", [])
                 sources = result.get("sources", [])
+                cached = result.get("cached", False)
+                cache_type = result.get("cache_type")
+                cache_score = result.get("cache_score", 0.0)
             error = ""
         except Exception as exc:
             latency = time.perf_counter() - started
@@ -289,8 +303,14 @@ def run_rag_cases(skip_live: bool, max_cases: int | None, delay_seconds: float) 
             tool_calls = []
             contexts = []
             sources = []
+            retrieval_queries = []
+            route_topic = None
+            cached = False
+            cache_type = None
+            cache_score = 0.0
             error = f"{exc.__class__.__name__}: {exc}"
 
+        expected_tool = case.get("expected_tool", "hybrid_retrieval")
         records.append(
             {
                 "agent": "rag_agent",
@@ -299,13 +319,13 @@ def run_rag_cases(skip_live: bool, max_cases: int | None, delay_seconds: float) 
                 "question": case["question"],
                 "answer": answer,
                 "tool_calls": tool_calls,
-                "expected_tool": "retrieve_context",
+                "expected_tool": expected_tool,
                 "latency_seconds": round(latency, 3),
-                "tool_selection_score": 1.0 if tool_calls else 0.0,
+                "tool_selection_score": expected_tool_score(tool_calls, expected_tool),
                 "content_match_score": 1.0 if contains_any(answer, case["must_contain_any"]) else 0.0,
                 "format_score": format_score(answer),
                 "source_score": source_score(answer),
-                "tool_efficiency_score": tool_efficiency_score(tool_calls),
+                "tool_efficiency_score": tool_efficiency_score(tool_calls, expected_tool),
                 "latency_score": latency_score(latency),
                 "error_handling_score": error_handling_score(answer),
                 "retrieved_context_count": len(contexts),
@@ -313,6 +333,11 @@ def run_rag_cases(skip_live: bool, max_cases: int | None, delay_seconds: float) 
                 "avg_context_chars": round(statistics.mean([len(context) for context in contexts]), 1)
                 if contexts
                 else 0,
+                "retrieval_queries": retrieval_queries,
+                "topic_filter": route_topic,
+                "cached": cached,
+                "cache_type": cache_type,
+                "cache_score": cache_score,
                 "error": error,
                 "status": "completed" if not error else "failed",
             }

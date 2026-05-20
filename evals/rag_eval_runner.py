@@ -9,15 +9,20 @@ from pathlib import Path
 from typing import Any
 
 from evals.eval_dataset import RAG_EVAL_CASES
+from langchain_compat import install_cachebacked_embeddings_shim
+
+install_cachebacked_embeddings_shim()
+
 from rag_agent import (
     DEFAULT_COLLECTION,
-    DEFAULT_URL,
     DEFAULT_VECTOR_DB_DIR,
-    index_source,
+    DEFAULT_WEB_LINKS,
+    index_sources,
     load_vector_store,
-    run_direct_rag,
-    retrieve_context_documents,
-    vector_store_has_documents,
+    prepare_retrieval_queries,
+    retrieve_context,
+    run_rag,
+    _vector_store_is_empty,
 )
 
 
@@ -36,25 +41,22 @@ def lexical_answer_from_context(question: str, contexts: list[str], reference: s
 
 
 def ensure_indexed(
-    url: str = DEFAULT_URL,
-    selector: str | None = "post-title,post-header,post-content",
     collection_name: str = DEFAULT_COLLECTION,
     persist_directory: str = DEFAULT_VECTOR_DB_DIR,
 ) -> Any:
     vector_store = load_vector_store(collection_name, persist_directory)
-    if not vector_store_has_documents(vector_store):
-        vector_store = index_source(url, selector, collection_name, persist_directory)
+    if _vector_store_is_empty(vector_store):
+        vector_store = index_sources(DEFAULT_WEB_LINKS, collection_name, persist_directory)
     return vector_store
 
 
 def build_rag_records(
     output_path: str | Path = RESULTS_DIR / "rag_eval_records.json",
-    url: str = DEFAULT_URL,
-    selector: str | None = "post-title,post-header,post-content",
     collection_name: str = DEFAULT_COLLECTION,
     persist_directory: str = DEFAULT_VECTOR_DB_DIR,
     use_cache: bool = True,
     no_llm: bool | None = None,
+    k: int = 5,
 ) -> list[dict[str, Any]]:
     output_path = Path(output_path)
     if use_cache and output_path.exists():
@@ -63,13 +65,23 @@ def build_rag_records(
     if no_llm is None:
         no_llm = os.getenv("RAG_EVAL_NO_LLM", "0") == "1"
 
-    vector_store = ensure_indexed(url, selector, collection_name, persist_directory)
+    vector_store = ensure_indexed(collection_name, persist_directory)
     records: list[dict[str, Any]] = []
 
     for case in RAG_EVAL_CASES:
         started = time.perf_counter()
+        topic_filter = case.get("topic_filter")
+        domain_filter = case.get("domain_filter")
+        retrieval_queries, detected_topic = prepare_retrieval_queries(case["question"])
+        effective_topic = topic_filter or detected_topic
         if no_llm:
-            docs = retrieve_context_documents(vector_store, case["question"], k=3)
+            docs = retrieve_context(
+                vector_store,
+                retrieval_queries,
+                k=k,
+                topic=effective_topic,
+                domain=domain_filter,
+            )
             rag_result = {
                 "answer": lexical_answer_from_context(
                     case["question"],
@@ -78,18 +90,43 @@ def build_rag_records(
                 ),
                 "contexts": [doc.page_content for doc in docs],
                 "sources": [doc.metadata.get("source", "unknown") for doc in docs],
+                "retrieval_queries": retrieval_queries,
+                "topic_filter": effective_topic,
+                "cached": False,
+                "cache_type": None,
+                "cache_score": 0.0,
             }
         else:
-            rag_result = run_direct_rag(case["question"], vector_store, k=3)
+            rag_result = run_rag(
+                case["question"],
+                vector_store,
+                collection_name=collection_name,
+                k=k,
+                topic_filter=topic_filter,
+                domain_filter=domain_filter,
+                use_cache=os.getenv("RAGAS_USE_RESPONSE_CACHE", "0") == "1",
+            )
+            retrieval_queries = rag_result.get("retrieval_queries", retrieval_queries)
+            effective_topic = rag_result.get("topic_filter", effective_topic)
         latency = time.perf_counter() - started
         records.append(
             {
+                "id": case["id"],
                 "question": case["question"],
                 "answer": rag_result["answer"],
                 "contexts": rag_result["contexts"],
                 "ground_truth": case["reference"],
                 "reference": case["reference"],
                 "sources": rag_result["sources"],
+                "topic_filter": topic_filter,
+                "effective_topic_filter": effective_topic,
+                "domain_filter": domain_filter,
+                "retrieval_queries": retrieval_queries,
+                "cached": rag_result.get("cached", False),
+                "cache_type": rag_result.get("cache_type"),
+                "cache_score": rag_result.get("cache_score", 0.0),
+                "retrieved_context_count": len(rag_result["contexts"]),
+                "unique_source_count": len(set(rag_result["sources"])),
                 "latency_seconds": round(latency, 3),
                 "generation_mode": "no_llm_reference_fallback" if no_llm else "llm",
             }

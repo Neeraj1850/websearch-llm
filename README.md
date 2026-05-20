@@ -16,6 +16,13 @@ Groq is used as the default chat model provider. Ollama is supported for the RAG
 - Thread-based short-term memory
 - RAG over indexed web pages
 - Persistent Chroma vector DB for faster retrieval
+- 20-link web corpus ingestion
+- Unstructured HTML loading
+- Semantic chunking
+- Hybrid dense + BM25 retrieval
+- Metadata filtering
+- Reranking
+- Self-reflection before final RAG answers
 - Unit tests for tools and RAG helpers
 - RAGAS, DeepEval, and a custom scorecard runner
 - Graceful scorecard handling for Groq rate limits
@@ -39,8 +46,21 @@ Edit `.env`:
 GROQ_API_KEY=your_groq_api_key_here
 GROQ_MODEL=llama-3.1-8b-instant
 CURRENT_DATE=2026-05-19
+ENABLE_LLM_CACHE=1
+AGENT_MAX_ITERATIONS=3
 RAG_MODEL_PROVIDER=groq
 RAG_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+RAG_EMBEDDING_DEVICE=cpu
+RAG_EMBEDDING_CACHE_DIR=.cache/embeddings
+RAG_ENABLE_RERANKING=1
+RAG_RERANKER_MODEL=BAAI/bge-reranker-base
+RAG_RERANKER_DEVICE=cpu
+RAG_ENABLE_SELF_REFLECTION=1
+RAG_ENABLE_LLM_CACHE=1
+RAG_ENABLE_QUERY_ENHANCER=1
+RAG_ENABLE_HYDE=0
+RAG_CONTEXT_CHAR_LIMIT=5000
+RAG_RESPONSE_CACHE_THRESHOLD=0.9
 OLLAMA_MODEL=llama3.1:8b
 ```
 
@@ -62,7 +82,7 @@ python agent.py "What is my name?" --thread-id demo
 python agent.py "Start fresh" --thread-id demo --clear-memory
 ```
 
-The tool agent uses LangChain’s classic ReAct pattern:
+The tool agent uses LangChain's classic ReAct pattern:
 
 ```text
 Thought -> Action -> Action Input -> Observation -> Final Answer
@@ -76,7 +96,7 @@ Available tools:
 
 ## RAG Agent
 
-Index the default article:
+Index the default 20-link corpus:
 
 ```powershell
 python rag_agent.py --index
@@ -92,20 +112,30 @@ python rag_agent.py "How does reflection help autonomous agents?" --show-tools
 Rebuild the vector DB:
 
 ```powershell
-python rag_agent.py --reindex
+python rag_agent.py --reindex --clear-response-cache
 ```
 
-Index another page:
+Index a single custom page instead of the default corpus:
 
 ```powershell
-python rag_agent.py "What is this page about?" --url https://example.com --selector "" --show-tools
+python rag_agent.py --index --single-url --url https://example.com
+python rag_agent.py "What is this page about?" --single-url --url https://example.com --show-tools
+```
+
+Use metadata filtering:
+
+```powershell
+python rag_agent.py "How does hybrid search work?" --topic-filter retrieval --show-tools
+python rag_agent.py "What does LangChain say about agents?" --domain-filter docs.langchain.com --show-tools
 ```
 
 RAG flow:
 
 ```text
-web page -> BeautifulSoup text extraction -> chunking -> HuggingFace embeddings
--> Chroma vector DB -> retrieve_context tool -> LLM answer with sources
+user query -> local router -> query enhancer -> optional HyDE
+-> semantic response cache lookup -> parallel Chroma dense search + BM25 sparse search
+-> metadata filtering -> dedupe -> reranking -> limited context window
+-> answer draft -> optional self-reflection -> final answer -> response cache write
 ```
 
 Vector data is stored locally in:
@@ -113,6 +143,57 @@ Vector data is stored locally in:
 ```text
 .vector_db/chroma
 ```
+
+Cached HTML, embeddings, final responses, and BM25 chunks are stored locally in:
+
+```text
+.cache/html
+.cache/embeddings
+.cache/rag_responses.json
+.vector_db/chunks.jsonl
+```
+
+Final response caching is semantic, not only exact-string based. The RAG agent embeds the new question, compares it against cached question embeddings, and reuses a cached answer when cosine similarity is above `RAG_RESPONSE_CACHE_THRESHOLD` (`0.9` by default).
+
+Latency controls:
+
+| Control | Default | Why it helps |
+|---|---:|---|
+| Local router | on | Picks obvious metadata topics before retrieval without an LLM call. |
+| Query enhancer | on | Expands terms such as `RAG` to `retrieval augmented generation` before search. |
+| Semantic response cache | on | Reuses answers for semantically similar questions, not just exact repeats. |
+| LangChain LLM cache | on | Uses `langchain_core.caches.InMemoryCache` for exact prompt/model repeats during a process. |
+| Parallel hybrid search | on | Runs dense Chroma retrieval and BM25 retrieval concurrently. |
+| Direct RAG pipeline | on | Uses one deterministic routed retrieval path for normal RAG questions. |
+| Limited context | 5000 chars | Caps tokens sent to the LLM. |
+| HyDE | off | Available with `RAG_ENABLE_HYDE=1`, but disabled by default because it adds an LLM call. |
+
+Default corpus topics include `agents`, `rag`, `tools`, `memory`, `retrieval`, `embeddings`, `chunking`, `vectorstores`, `loaders`, and `reranking`.
+
+**Default Corpus**
+
+| # | Topic | URL |
+|---:|---|---|
+| 1 | agents | https://lilianweng.github.io/posts/2023-06-23-agent/ |
+| 2 | langchain | https://docs.langchain.com/oss/python/langchain/overview |
+| 3 | agents | https://docs.langchain.com/oss/python/langchain/agents |
+| 4 | tools | https://docs.langchain.com/oss/python/langchain/tools |
+| 5 | rag | https://docs.langchain.com/oss/python/langchain/rag |
+| 6 | memory | https://docs.langchain.com/oss/python/langchain/short-term-memory |
+| 7 | loaders | https://docs.langchain.com/oss/python/integrations/document_loaders/url |
+| 8 | retrieval | https://docs.langchain.com/oss/python/integrations/providers/rank_bm25 |
+| 9 | embeddings | https://docs.langchain.com/oss/python/integrations/embeddings/index |
+| 10 | vectorstores | https://docs.langchain.com/oss/python/integrations/vectorstores/chroma |
+| 11 | chunking | https://python.langchain.com/docs/how_to/semantic-chunker/ |
+| 12 | retrieval | https://python.langchain.com/docs/how_to/MultiQueryRetriever/ |
+| 13 | reranking | https://python.langchain.com/docs/how_to/contextual_compression/ |
+| 14 | retrieval | https://python.langchain.com/docs/how_to/ensemble_retriever/ |
+| 15 | rag | https://www.pinecone.io/learn/retrieval-augmented-generation/ |
+| 16 | retrieval | https://www.pinecone.io/learn/hybrid-search-intro/ |
+| 17 | retrieval | https://weaviate.io/blog/hybrid-search-explained |
+| 18 | retrieval | https://www.elastic.co/what-is/vector-search |
+| 19 | embeddings | https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2 |
+| 20 | reranking | https://huggingface.co/BAAI/bge-reranker-base |
 
 ## Evaluation
 
@@ -183,6 +264,27 @@ python -m evals.scorecard --skip-live
 
 The scorecard now marks Groq quota failures as `skipped_rate_limit` so they do not distort quality scores.
 
+## Streamlit Dashboard
+
+Run the dashboard:
+
+```powershell
+streamlit run streamlit_app.py
+```
+
+The app shows:
+
+- the full RAG pipeline
+- the 20-link corpus
+- index/cache status
+- tool-agent querying
+- RAG querying with semantic response caching
+- semantic response-cache status
+- retrieved contexts and sources
+- scorecard summaries
+- RAGAS results
+- local cache/artifact sizes
+
 ### Latest Scorecard
 
 This run evaluated 8 cases across the tool-calling agent and the RAG agent.
@@ -234,10 +336,9 @@ This run evaluated 8 cases across the tool-calling agent and the RAG agent.
 
 ## RAGAS And DeepEval
 
-RAGAS and DeepEval are optional and are commented in `requirements.txt` because they add heavier dependencies. For Python 3.11 or 3.12, uncomment:
+RAGAS is included in `requirements.txt` and is the main RAG evaluation path. DeepEval is optional because it adds heavier dependencies. For Python 3.11 or 3.12, uncomment:
 
 ```text
-# ragas>=0.2.0
 # deepeval>=3.0.0
 ```
 
@@ -251,6 +352,24 @@ Run RAGAS:
 
 ```powershell
 python -m evals.ragas_eval
+```
+
+The RAGAS runner evaluates the upgraded RAG stack over the 20-link corpus. It regenerates records with:
+
+- Unstructured HTML loading
+- semantic chunking
+- sentence-transformers embeddings
+- hybrid dense + BM25 retrieval
+- metadata filters from the eval dataset
+- reranked contexts
+- self-reflected answers
+
+It requests every compatible RAGAS metric available in your installed version, including faithfulness, answer relevancy, answer correctness/similarity, context precision/recall, context entity recall, and noise sensitivity when supported. Results are written to:
+
+```text
+results/ragas_results.csv
+results/ragas_results.json
+results/ragas_summary.json
 ```
 
 Run DeepEval gently on Groq free tier:

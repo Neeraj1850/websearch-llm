@@ -32,7 +32,8 @@ MAX_WIKI_RESULTS = 2
 MAX_ARXIV_RESULTS = 3
 MEMORY_PATH = Path(".memory") / "short_term_memory.json"
 DEFAULT_THREAD_ID = "default"
-MAX_MEMORY_MESSAGES = 8
+MAX_MEMORY_MESSAGES = 6
+DEFAULT_MAX_ITERATIONS = 3
 
 REACT_PROMPT = """Answer the following question as best you can. You have access to the following tools:
 
@@ -179,6 +180,7 @@ def arxiv_search(query: str) -> str:
 
 def build_model() -> ChatGroq:
     load_dotenv()
+    setup_langchain_llm_cache()
 
     if not os.getenv("GROQ_API_KEY"):
         raise RuntimeError(
@@ -191,6 +193,20 @@ def build_model() -> ChatGroq:
         max_retries=2,
         timeout=30,
     )
+
+
+def setup_langchain_llm_cache() -> None:
+    """Enable LangChain Core exact LLM caching for repeated prompts in this process."""
+    if os.getenv("ENABLE_LLM_CACHE", "1") == "0":
+        return
+    try:
+        from langchain_core.caches import InMemoryCache
+        from langchain_core.globals import get_llm_cache, set_llm_cache
+
+        if get_llm_cache() is None:
+            set_llm_cache(InMemoryCache())
+    except Exception:
+        return
 
 
 def load_memory_store() -> dict[str, list[dict[str, Any]]]:
@@ -285,7 +301,7 @@ def build_react_executor(model: ChatGroq) -> AgentExecutor:
     return AgentExecutor(
         agent=agent,
         tools=tools,
-        max_iterations=4,
+        max_iterations=int(os.getenv("AGENT_MAX_ITERATIONS", str(DEFAULT_MAX_ITERATIONS))),
         handle_parsing_errors=(
             "Invalid ReAct format. Use exactly either "
             "'Action:' with 'Action Input:' or 'Final Answer:'."
