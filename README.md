@@ -96,7 +96,7 @@ Available tools:
 
 ## RAG Agent
 
-Index the default 20-link corpus:
+Index the default corpus:
 
 ```powershell
 python rag_agent.py --index
@@ -105,37 +105,50 @@ python rag_agent.py --index
 Ask questions:
 
 ```powershell
-python rag_agent.py "What is task decomposition?" --show-tools
-python rag_agent.py "How does reflection help autonomous agents?" --show-tools
+python rag_agent.py "What is task decomposition?" --show-queries
+python rag_agent.py "How does reflection help autonomous agents?" --show-queries
 ```
 
 Rebuild the vector DB:
 
 ```powershell
-python rag_agent.py --reindex --clear-response-cache
+python rag_agent.py --reindex --clear-cache
+```
+
+Clear every local RAG artifact and start fresh:
+
+```powershell
+python rag_agent.py --clear-all-cache
 ```
 
 Index a single custom page instead of the default corpus:
 
 ```powershell
 python rag_agent.py --index --single-url --url https://example.com
-python rag_agent.py "What is this page about?" --single-url --url https://example.com --show-tools
+python rag_agent.py "What is this page about?" --single-url --url https://example.com --show-queries
 ```
 
 Use metadata filtering:
 
 ```powershell
-python rag_agent.py "How does hybrid search work?" --topic-filter retrieval --show-tools
-python rag_agent.py "What does LangChain say about agents?" --domain-filter docs.langchain.com --show-tools
+python rag_agent.py "How does hybrid search work?" --topic-filter retrieval --show-queries
+python rag_agent.py "What does LangChain say about agents?" --domain-filter docs.langchain.com --show-queries
 ```
 
 RAG flow:
 
 ```text
-user query -> local router -> query enhancer -> optional HyDE
--> semantic response cache lookup -> parallel Chroma dense search + BM25 sparse search
--> metadata filtering -> dedupe -> reranking -> limited context window
--> answer draft -> optional self-reflection -> final answer -> response cache write
+Index once:
+20-link corpus -> cached HTML -> UnstructuredHTMLLoader -> recursive text chunks
+-> cached sentence-transformer embeddings -> Chroma dense index + BM25 chunks
+
+Query:
+user query -> exact/semantic response cache lookup
+-> local router + query enhancer + optional HyDE/multi-query
+-> async parallel Chroma dense search + BM25 sparse search
+-> RRF fusion -> reranking -> limited context window
+-> answer draft -> optional self-reflection -> final answer + sources
+-> SQLite response cache write
 ```
 
 Vector data is stored locally in:
@@ -149,7 +162,7 @@ Cached HTML, embeddings, final responses, and BM25 chunks are stored locally in:
 ```text
 .cache/html
 .cache/embeddings
-.cache/rag_responses.json
+.cache/rag_responses.db
 .vector_db/chunks.jsonl
 ```
 
@@ -357,7 +370,7 @@ python -m evals.ragas_eval
 The RAGAS runner evaluates the upgraded RAG stack over the 20-link corpus. It regenerates records with:
 
 - Unstructured HTML loading
-- semantic chunking
+- recursive text chunking
 - sentence-transformers embeddings
 - hybrid dense + BM25 retrieval
 - metadata filters from the eval dataset

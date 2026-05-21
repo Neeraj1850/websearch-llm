@@ -9,21 +9,15 @@ from rag_agent import (
     _chroma_filter,
     _cosine,
     _doc_id,
-    _load_cache,
-    _metadata_matches,
     _rrf_fuse,
-    _save_cache,
     _serialize_context,
     chunk_documents,
-    enhance_query,
+    _enhance_query,
     prepare_retrieval_queries,
 )
 
 
 def test_chunk_documents_splits_long_document() -> None:
-    import os
-
-    os.environ["RAG_USE_SEMANTIC_CHUNKING"] = "0"
     doc = Document(page_content="Sentence about agents. " * 200, metadata={"source": "unit-test"})
     chunks = chunk_documents([doc])
     assert len(chunks) > 1
@@ -56,17 +50,10 @@ def test_query_preparation_routes_and_enhances_rag() -> None:
     queries, topic = prepare_retrieval_queries("What is RAG")
     assert topic == "rag"
     assert any("retrieval augmented generation" in query.lower() for query in queries)
-    assert "retrieval augmented generation" in enhance_query("What is RAG").lower()
+    assert "retrieval augmented generation" in _enhance_query("What is RAG").lower()
 
 
-def test_metadata_filter_helpers() -> None:
-    doc = Document(
-        page_content="hybrid search",
-        metadata={"topic": "retrieval", "domain": "docs.langchain.com"},
-    )
-    assert _metadata_matches(doc, topic="retrieval", domain=None)
-    assert _metadata_matches(doc, topic=None, domain="docs.langchain.com")
-    assert not _metadata_matches(doc, topic="agents", domain=None)
+def test_chroma_filter_helper() -> None:
     assert _chroma_filter(topic="retrieval", domain=None) == {"topic": {"$eq": "retrieval"}}
     assert _chroma_filter(topic=None, domain="docs.langchain.com") == {
         "domain": {"$eq": "docs.langchain.com"}
@@ -83,13 +70,6 @@ def test_rrf_fuse_merges_duplicate_chunks() -> None:
         Document(page_content="different", metadata={"source_url": "source", "chunk_index": 2}),
     ]
     assert len(_rrf_fuse([docs[:2], docs[1:]])) == 2
-
-
-def test_response_cache_round_trip(tmp_path) -> None:
-    cache_path = tmp_path / "responses.json"
-    cache = {"abc": {"answer": "cached"}}
-    _save_cache(cache, path=str(cache_path))
-    assert _load_cache(path=str(cache_path)) == cache
 
 
 def test_response_cache_key_changes_with_filter() -> None:
